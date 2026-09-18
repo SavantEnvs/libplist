@@ -1,0 +1,11 @@
+project: savantenvs/libplist
+target: bplist_fuzzer-buggy-mhh-run-33
+
+cmds:
+  - cmd: /mayhem/out/bplist_fuzzer
+    libfuzzer: true
+    dictionary: /mayhem/fuzz/bplist.dict
+
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/bplist_fuzzer-buggy-mhh-run-33/testsuite
