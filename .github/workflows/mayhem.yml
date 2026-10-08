@@ -1,0 +1,146 @@
+# The Mayhem worker for a BUG-MINING branch (mine-<BASE7>): one additive commit (the v2 mayhem/ layer)
+# on a historical upstream commit that precedes known upstream fixes. Unlike a backport, there is no
+# known crasher to replay: each run FUZZES the old commit to find those bugs again. Build the commit
+# image from mayhem/Dockerfile, push it to ghcr, then run Mayhem over every mayhem/Mayhemfile* (listed
+# at run time). Each run is seeded with the corpus of the live target named by the Mayhemfile's
+# `# seed-from:` line (our own fuzzing corpus at the live HEAD, downloaded onto the runner, never into
+# the branch or the image) plus the Mayhemfile's committed seeds, and fuzzes for `duration` seconds.
+# Runs only on an explicit dispatch; no cron, no push trigger:
+#   gh workflow run mayhem.yml --ref mine-<BASE7> [-f duration=3600] [-f target=<target>]
+name: Mayhem
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzzing duration in seconds per target.'
+        type: string
+        required: false
+        default: '3600'
+      target:
+        description: 'Fuzz only this mined target (default: every Mayhemfile).'
+        type: string
+        required: false
+        default: ''
+  workflow_call:                   # kept for the shared spec contract; nothing calls it (no sync.yml)
+    inputs:
+      duration:
+        description: fuzzing duration in seconds per target
+        type: string
+        required: false
+        default: '3600'
+      target:
+        description: fuzz only this mined target
+        type: string
+        required: false
+        default: ''
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:                           # first in the file: spec-check reads the FIRST checkout's fetch-depth
+    name: build commit image
+    needs: mayhemfiles             # a mistyped `target` fails before the image is built
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          fetch-depth: 0          # the Dockerfile COPYs .git into /mayhem: the image needs full history
+
+      - name: Resolve build SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=commit-${{ steps.sha.outputs.sha }}
+
+      - name: Build and push (mayhem/Dockerfile)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: mayhem/Dockerfile
+          push: true
+          build-args: |
+            COMMIT=${{ steps.sha.outputs.sha }}
+            REPO_URL=${{ github.server_url }}/${{ github.repository }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      ref: ${{ steps.sha.outputs.sha }}
+
+  mayhemfiles:
+    name: list Mayhemfiles
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.ls.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: One matrix entry per mayhem/Mayhemfile* (only `target`'s, if given)
+        id: ls
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          m=$(for f in mayhem/Mayhemfile*; do
+                t=$(sed -nE 's/^[[:space:]]*target:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' "$f" | head -1)
+                s=$(sed -nE 's|^#[[:space:]]*seed-from:[[:space:]]*https://app\.mayhem\.security/([^/[:space:]]+/[^/[:space:]]+/[^/[:space:]]+)[[:space:]]*$|\1|p' "$f" | head -1)
+                case "$t" in *-mined-*) ;; *) echo "::error file=$f::target '$t' lacks the -mined-<BASE7> suffix (it would fuzz a live target)"; exit 1;; esac
+                if [ -z "$TARGET" ] || [ "$t" = "$TARGET" ]; then printf '%s\t%s\t%s\n' "$f" "$t" "$s"; fi
+              done | jq -R -s -c '{include: split("\n") | map(select(length > 0) | split("\t") | {mayhemfile: .[0], target: .[1], seedfrom: .[2]})}')
+          if [ "$(jq '.include | length' <<<"$m")" -eq 0 ]; then
+            echo "::error::no mayhem/Mayhemfile* has target '$TARGET'"; exit 1
+          fi
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+
+  mayhem:
+    needs: [build, mayhemfiles]
+    name: 'fuzz ${{ matrix.target }}'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.mayhemfiles.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.build.outputs.ref }}
+      - name: Seeds from ${{ matrix.seedfrom }} and the committed testsuite
+        shell: bash
+        env:
+          MAYHEM_TOKEN: ${{ secrets.MAYHEM_TOKEN }}
+          SEEDFROM: ${{ matrix.seedfrom }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          d="$RUNNER_TEMP/seeds" && mkdir -p "$d"
+          if [ -n "$SEEDFROM" ]; then
+            IFS=/ read -r org project target <<<"$SEEDFROM"
+            # to a file, not piped: Mayhem pads the tar past its end-of-archive marker
+            curl -fsSL --retry 3 -H "X-Mayhem-Token: token $MAYHEM_TOKEN" -o "$RUNNER_TEMP/seeds.tar" \
+              "https://app.mayhem.security/api/v2/owner/$org/project/$project/target/$target/testsuite.tar"
+            tar -x -C "$d" -f "$RUNNER_TEMP/seeds.tar"
+          fi
+          if [ -d "mayhem/$TARGET/testsuite" ]; then cp -r "mayhem/$TARGET/testsuite/." "$d/"; fi
+          n=$(find "$d" -type f | wc -l)
+          [ "$n" -gt 0 ] || { echo "::error::no seeds for $TARGET"; exit 1; }
+          echo "$n seed file(s) for $TARGET (live corpus: ${SEEDFROM:-none})"
+      - name: Fuzz the old commit (${{ matrix.target }})
+        uses: ForAllSecure/mcode-action@08516a896b38a6d4955bceb640c21908ec0c416b # v1.0.12
+        with:
+          mayhem-token: ${{ secrets.MAYHEM_TOKEN }}
+          args: --image ${{ needs.build.outputs.image }} --file ${{ matrix.mayhemfile }} --testsuite file://${{ runner.temp }}/seeds --duration ${{ inputs.duration || '3600' }}

@@ -1,0 +1,12 @@
+project: savantenvs/libplist
+target: oplist_fuzzer-mined-491a3ac
+# seed-from: https://app.mayhem.security/savantenvs/libplist/oplist-fuzzer
+
+cmds:
+  - cmd: /mayhem/out/oplist_fuzzer
+    libfuzzer: true
+    dictionary: /mayhem/fuzz/oplist.dict
+
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
+  - file://mayhem/oplist_fuzzer-mined-491a3ac/testsuite
