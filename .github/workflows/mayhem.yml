@@ -1,0 +1,80 @@
+# The workflow for a BUG-MINING branch (mine-<BASE7>, RFD 0004) — copied verbatim from the workflow
+# repo's mayhem-repo-mine/ overlay; verify-backport.sh requires it byte-for-byte, so never edit it here.
+# It only builds the commit image from mayhem/Dockerfile and pushes it to ghcr as commit-<sha>. It
+# starts no Mayhem run: the bug was reproduced locally, and the worker that holds those reproductions
+# starts the regression-only run with them (mayhem run --regression --testsuite file://<reproductions>
+# --image <this image>), so no reproduction is ever on the branch, in the image or on a runner.
+# Runs only on an explicit dispatch:
+#   gh workflow run mayhem.yml --ref mine-<BASE7>
+# (`workflow_call` is kept only for the shared spec contract; nothing calls it — a mining branch has no sync.yml.)
+name: Mayhem
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build:                           # first in the file: spec-check reads the FIRST checkout's fetch-depth
+    name: build commit image
+    needs: mayhemfiles             # an unsuffixed target fails before the image is built
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: recursive
+          fetch-depth: 0          # the Dockerfile COPYs .git into /mayhem: the image needs full history
+
+      - name: Resolve build SHA
+        id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: type=raw,value=commit-${{ steps.sha.outputs.sha }}
+
+      - name: Build and push (mayhem/Dockerfile)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: mayhem/Dockerfile
+          push: true
+          build-args: |
+            COMMIT=${{ steps.sha.outputs.sha }}
+            REPO_URL=${{ github.server_url }}/${{ github.repository }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      ref: ${{ steps.sha.outputs.sha }}
+
+  mayhemfiles:
+    name: check Mayhemfiles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Every mayhem/Mayhemfile* names a -mined-<BASE7> target (none can reach a live target)
+        run: |
+          bad=0
+          for f in mayhem/Mayhemfile*; do
+            t=$(sed -nE 's/^[[:space:]]*target:[[:space:]]*"?([^"[:space:]]+)"?.*/\1/p' "$f" | head -1)
+            case "$t" in *-mined-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) echo "$f: $t";;
+              *) echo "::error file=$f::target '$t' lacks the -mined-<BASE7> suffix"; bad=1;; esac
+          done
+          exit "$bad"

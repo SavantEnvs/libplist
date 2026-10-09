@@ -1,0 +1,15 @@
+project: savantenvs/libplist
+target: oplist_fuzzer-mined-491a3ac
+# fix: 62b03b85a56a7b98e6eef237deeff1a8b41f8fb8
+# fix: 5bdbd3fe620e66a65373524a0707909ca926a3a1
+# fix: 79f58e9355e9bddd44e77f0d7f69dd96cce38cc6
+# fix: 47a7fbe438ee7350a2b151e007f07043ef596775
+# fix: 85f5cbd3705b34fcc52009ca51d8167ab18764fa
+
+cmds:
+  - cmd: /mayhem/out/oplist_fuzzer
+    libfuzzer: true
+    dictionary: /mayhem/fuzz/oplist.dict
+
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar

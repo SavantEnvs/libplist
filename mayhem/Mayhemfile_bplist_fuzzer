@@ -1,0 +1,11 @@
+project: savantenvs/libplist
+target: bplist_fuzzer-mined-491a3ac
+# fix: 15164ebe870590376b2286b09dc97890a07dd373
+
+cmds:
+  - cmd: /mayhem/out/bplist_fuzzer
+    libfuzzer: true
+    dictionary: /mayhem/fuzz/bplist.dict
+
+testsuite:
+  - https://$MAYHEM_DOMAIN/$MAYHEM_PROJECT/$MAYHEM_TARGET/testsuite.tar
